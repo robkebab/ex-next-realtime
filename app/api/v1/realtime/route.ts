@@ -20,56 +20,61 @@ const index = `
 console.log("Hello, world!");
 `;
 
+async function createWebSocketServer() {
+  const sandbox = await Sandbox.create({
+    resources: { vcpus: 2 },
+    timeout: ms("5m"),
+    ports: [3000],
+    runtime: "node22",
+  });
+
+  console.log(`Writing sandbox files...`);
+  await sandbox.writeFiles([
+    { path: "package.json", content: Buffer.from(pkgJson) },
+    { path: "index.js", content: Buffer.from(index) },
+    {
+      path: ".env",
+      content: Buffer.from(`OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`),
+    },
+  ]);
+
+  console.log(`Installing sandbox dependencies...`);
+  const install = await sandbox.runCommand({
+    cmd: "npm",
+    args: ["install", "--loglevel", "info"],
+    stderr: process.stderr,
+    stdout: process.stdout,
+  });
+
+  if (install.exitCode != 0) {
+    console.log("installing packages failed");
+    throw new Error("Installing packages failed");
+  }
+
+  console.log(`Starting the sandbox server...`);
+  await sandbox.runCommand({
+    cmd: "npm",
+    args: ["run", "dev"],
+    stderr: process.stderr,
+    stdout: process.stdout,
+  });
+
+  const publicUrl = sandbox.domain(3000);
+  publicUrl.replace(/^https:/, "wss:");
+}
+
 export async function POST(_request: Request) {
   try {
-    const sandbox = await Sandbox.create({
-      resources: { vcpus: 2 },
-      // Timeout in milliseconds: ms('10m') = 600000
-      // Defaults to 5 minutes. The maximum is 5 hours for Pro/Enterprise, and 45 minutes for Hobby.
-      timeout: ms("5m"),
-      ports: [3000],
-      runtime: "node22",
-    });
-
-    await sandbox.writeFiles([
-      { path: "package.json", content: Buffer.from(pkgJson) },
-      { path: "index.js", content: Buffer.from(index) },
-      {
-        path: ".env",
-        content: Buffer.from(`OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`),
-      },
-    ]);
-
-    console.log(`Installing dependencies...`);
-    const install = await sandbox.runCommand({
-      cmd: "npm",
-      args: ["install", "--loglevel", "info"],
-      stderr: process.stderr,
-      stdout: process.stdout,
-    });
-
-    if (install.exitCode != 0) {
-      console.log("installing packages failed");
-      throw new Error("Installing packages failed");
-    }
-
-    console.log(`Starting the development server...`);
-    await sandbox.runCommand({
-      cmd: "npm",
-      args: ["run", "dev"],
-      stderr: process.stderr,
-      stdout: process.stdout,
-    });
-
-    const publicUrl = sandbox.domain(3000);
+    // const socketUrl = await createWebSocketServer();
+    const socketUrl = "ws://localhost:8080/realtime";
 
     return NextResponse.json({
-      socketUrl: publicUrl.replace(/^https:/, "wss:"),
+      socketUrl,
     });
   } catch (error) {
     console.error(error);
     return NextResponse.json(
-      { error: "Failed to create sandbox", details: error },
+      { error: "Failed to create sandbox" },
       { status: 500 }
     );
   }
