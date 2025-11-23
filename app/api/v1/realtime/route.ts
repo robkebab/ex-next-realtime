@@ -4,14 +4,14 @@ import ms from "ms";
 
 async function createWebSocketServer() {
   const sandbox = await Sandbox.create({
-    source: { type: "git", url: "https://github.com/robkebab/ex-s2s-proxy" },
+    source: { type: "git", url: "https://github.com/robkebab/ex-s2s-proxy.git" },
     resources: { vcpus: 2 },
     timeout: ms("5m"),
     ports: [3000],
     runtime: "node22",
   });
 
-  console.log(`Writing sandbox files...`);
+  console.log(`Writing sandbox env file...`);
   await sandbox.writeFiles([
     {
       path: ".env",
