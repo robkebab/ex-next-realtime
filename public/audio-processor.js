@@ -21,16 +21,6 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
     return pcm16;
   }
 
-  // Encode PCM16 data to base64
-  pcm16ToBase64(pcm16Array) {
-    const bytes = new Uint8Array(pcm16Array.buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  }
-
   process(inputs, outputs, parameters) {
     const input = inputs[0];
     
@@ -43,15 +33,15 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
         
         // When buffer is full, process and send it
         if (this.bufferIndex >= this.bufferSize) {
-          // Convert to PCM16 and encode to base64
+          // Convert to PCM16
           const pcm16Data = this.float32ToPCM16(this.buffer);
-          const base64Audio = this.pcm16ToBase64(pcm16Data);
           
-          // Send the encoded audio to the main thread
+          // Send raw PCM16 data to main thread (as ArrayBuffer)
+          // Base64 encoding will happen in the main thread where btoa is available
           this.port.postMessage({
             type: 'audio',
-            data: base64Audio,
-          });
+            data: pcm16Data.buffer,
+          }, [pcm16Data.buffer]); // Transfer ownership for performance
           
           // Reset buffer
           this.bufferIndex = 0;

@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 
-export default function RecordAudio() {
+export default function RecordButton() {
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState<string>("Ready");
 
@@ -10,6 +10,11 @@ export default function RecordAudio() {
   const audioWorkletNode = useRef<AudioWorkletNode | null>(null);
   const mediaStream = useRef<MediaStream | null>(null);
   const websocket = useRef<WebSocket | null>(null);
+
+  // Audio playback references
+  const playbackContext = useRef<AudioContext | null>(null);
+  const nextPlaybackTime = useRef<number>(0);
+  const isPlayingAudio = useRef<boolean>(false);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -20,9 +25,261 @@ export default function RecordAudio() {
         audioContext.current?.close();
         websocket.current?.close();
       }
+      if (playbackContext.current) {
+        playbackContext.current.close();
+      }
     };
   }, []);
 
+  // Initialize audio playback context
+  const initPlaybackContext = useCallback(() => {
+    if (!playbackContext.current) {
+      playbackContext.current = new AudioContext({ sampleRate: 24000 });
+      nextPlaybackTime.current = playbackContext.current.currentTime;
+    }
+  }, []);
+
+  // Decode base64 PCM16 to AudioBuffer
+  const decodeBase64PCM16 = useCallback(
+    (base64Audio: string, sampleRate: number = 24000): AudioBuffer => {
+      // Decode base64 to binary string
+      const binaryString = atob(base64Audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      // Convert bytes to Int16Array (PCM16)
+      const pcm16 = new Int16Array(bytes.buffer);
+
+      // Convert PCM16 to Float32 for Web Audio API
+      const float32 = new Float32Array(pcm16.length);
+      for (let i = 0; i < pcm16.length; i++) {
+        float32[i] = pcm16[i] / (pcm16[i] < 0 ? 0x8000 : 0x7fff);
+      }
+
+      // Create AudioBuffer
+      if (!playbackContext.current) {
+        throw new Error("Playback context not initialized");
+      }
+
+      const audioBuffer = playbackContext.current.createBuffer(
+        1, // mono
+        float32.length,
+        sampleRate
+      );
+
+      audioBuffer.copyToChannel(float32, 0);
+      return audioBuffer;
+    },
+    []
+  );
+
+  // Play audio buffer with smooth scheduling
+  const playAudioBuffer = useCallback(
+    (audioBuffer: AudioBuffer) => {
+      if (!playbackContext.current || isRecording) return;
+
+      const source = playbackContext.current.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(playbackContext.current.destination);
+
+      // Schedule playback
+      const currentTime = playbackContext.current.currentTime;
+      const scheduleTime = Math.max(currentTime, nextPlaybackTime.current);
+
+      source.start(scheduleTime);
+
+      // Update next playback time for smooth continuation
+      nextPlaybackTime.current = scheduleTime + audioBuffer.duration;
+
+      // Track playing state
+      isPlayingAudio.current = true;
+      source.onended = () => {
+        isPlayingAudio.current = false;
+      };
+    },
+    [isRecording]
+  );
+
+  // Handle incoming audio data from WebSocket
+  const handleIncomingAudio = useCallback(
+    (base64Audio: string) => {
+      if (isRecording) {
+        // Don't play audio while recording
+        return;
+      }
+
+      try {
+        initPlaybackContext();
+        const audioBuffer = decodeBase64PCM16(base64Audio);
+        playAudioBuffer(audioBuffer);
+      } catch (error) {
+        console.error("Error playing audio:", error);
+      }
+    },
+    [isRecording, initPlaybackContext, decodeBase64PCM16, playAudioBuffer]
+  );
+
+  // Connect to WebSocket (only once, reused for multiple recordings)
+  const connectWebSocket = useCallback(async () => {
+    // Don't create a new connection if one already exists and is open/connecting
+    if (
+      websocket.current?.readyState === WebSocket.OPEN ||
+      websocket.current?.readyState === WebSocket.CONNECTING
+    ) {
+      return;
+    }
+
+    try {
+      setStatus("Connecting...");
+
+      // Fetch WebSocket URL from API
+      const response = await fetch("/api/v1/realtime", { method: "POST" });
+      const { socketUrl } = await response.json();
+
+      // Create WebSocket connection
+      websocket.current = new WebSocket(socketUrl);
+      websocket.current.binaryType = "arraybuffer";
+
+      websocket.current.onopen = () => {
+        setStatus("Connected");
+        // Initialize playback context for incoming audio
+        initPlaybackContext();
+      };
+
+      websocket.current.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        setStatus("WebSocket error");
+      };
+
+      websocket.current.onclose = () => {
+        setStatus("Disconnected");
+        setIsRecording(false);
+      };
+
+      websocket.current.onmessage = (event) => {
+        // Handle incoming messages from the server
+        try {
+          const message = JSON.parse(event.data);
+
+          // Handle OpenAI Realtime API audio delta events
+          if (message.type === "response.audio.delta" && message.delta) {
+            // Play incoming audio chunk
+            handleIncomingAudio(message.delta);
+          } else if (message.type === "error") {
+            console.error("Server error:", message.error);
+            setStatus(`Error: ${message.error.message || "Unknown error"}`);
+          } else {
+            // Log other message types for debugging
+            console.log("Received message:", message);
+          }
+        } catch (error) {
+          console.error("Error handling WebSocket message:", error);
+        }
+      };
+
+      // Wait for connection to open
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Connection timeout")), 10000);
+        
+        const checkConnection = () => {
+          if (websocket.current?.readyState === WebSocket.OPEN) {
+            clearTimeout(timeout);
+            resolve(true);
+          } else if (websocket.current?.readyState === WebSocket.CLOSED) {
+            clearTimeout(timeout);
+            reject(new Error("Connection failed"));
+          } else {
+            setTimeout(checkConnection, 100);
+          }
+        };
+        
+        checkConnection();
+      });
+    } catch (error) {
+      console.error("Error connecting to WebSocket:", error);
+      setStatus("Connection failed");
+      throw error;
+    }
+  }, [initPlaybackContext, handleIncomingAudio]);
+
+  // Convert ArrayBuffer to base64 string
+  const arrayBufferToBase64 = useCallback((buffer: ArrayBuffer): string => {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }, []);
+
+  // Start microphone recording
+  const startMicRecording = useCallback(async () => {
+    try {
+      // Create audio context for recording
+      audioContext.current = new AudioContext({
+        sampleRate: 24000, // 24kHz for optimal quality/performance balance
+      });
+
+      // Load the AudioWorklet processor
+      await audioContext.current.audioWorklet.addModule("/audio-processor.js");
+
+      // Get microphone access
+      mediaStream.current = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1, // Mono audio
+          sampleRate: 24000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      // Create audio source from microphone
+      const source = audioContext.current.createMediaStreamSource(
+        mediaStream.current
+      );
+
+      // Create AudioWorklet node
+      audioWorkletNode.current = new AudioWorkletNode(
+        audioContext.current,
+        "audio-stream-processor"
+      );
+
+      // Handle messages from the audio processor
+      audioWorkletNode.current.port.onmessage = (event) => {
+        if (
+          event.data.type === "audio" &&
+          websocket.current?.readyState === WebSocket.OPEN
+        ) {
+          // Convert PCM16 ArrayBuffer to base64
+          const base64Audio = arrayBufferToBase64(event.data.data);
+          
+          // Send base64 encoded PCM16 audio through WebSocket
+          // OpenAI expects the field to be named 'audio', not 'data'
+          websocket.current.send(
+            JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: base64Audio,
+            })
+          );
+        }
+      };
+
+      // Connect the audio nodes
+      source.connect(audioWorkletNode.current);
+
+      setStatus("Recording...");
+      setIsRecording(true);
+    } catch (error) {
+      console.error("Error setting up microphone:", error);
+      setStatus("Microphone error");
+      throw error;
+    }
+  }, [arrayBufferToBase64]);
+
+  // Stop microphone recording (but keep WebSocket open)
   const stopRecording = useCallback(() => {
     // Stop all tracks in the media stream
     if (mediaStream.current) {
@@ -42,112 +299,33 @@ export default function RecordAudio() {
       audioContext.current = null;
     }
 
-    // Close WebSocket connection
-    if (websocket.current) {
-      websocket.current.close();
-      websocket.current = null;
+    // Reset playback timing when stopping
+    if (playbackContext.current) {
+      nextPlaybackTime.current = playbackContext.current.currentTime;
     }
 
     setIsRecording(false);
-    setStatus("Ready");
+    
+    // Update status only if we're still connected
+    if (websocket.current?.readyState === WebSocket.OPEN) {
+      setStatus("Connected");
+    }
   }, []);
 
-  const startRecording = async () => {
+  // Start recording (connect WebSocket if needed, then start mic)
+  const startRecording = useCallback(async () => {
     try {
-      setStatus("Connecting...");
-
-      // Fetch WebSocket URL from API
-      const response = await fetch("/api/v1/realtime", { method: "POST" });
-      const { socketUrl } = await response.json();
-
-      // Create WebSocket connection
-      websocket.current = new WebSocket(socketUrl);
-
-      websocket.current.onopen = async () => {
-        setStatus("Connected to server");
-
-        try {
-          // Create audio context
-          audioContext.current = new AudioContext({
-            sampleRate: 24000, // 24kHz for optimal quality/performance balance
-          });
-
-          // Load the AudioWorklet processor
-          await audioContext.current.audioWorklet.addModule(
-            "/audio-processor.js"
-          );
-
-          // Get microphone access
-          mediaStream.current = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              channelCount: 1, // Mono audio
-              sampleRate: 24000,
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-          });
-
-          // Create audio source from microphone
-          const source = audioContext.current.createMediaStreamSource(
-            mediaStream.current
-          );
-
-          // Create AudioWorklet node
-          audioWorkletNode.current = new AudioWorkletNode(
-            audioContext.current,
-            "audio-stream-processor"
-          );
-
-          // Handle messages from the audio processor
-          audioWorkletNode.current.port.onmessage = (event) => {
-            if (
-              event.data.type === "audio" &&
-              websocket.current?.readyState === WebSocket.OPEN
-            ) {
-              // Send base64 encoded PCM16 audio through WebSocket
-              websocket.current.send(
-                JSON.stringify({
-                  type: "audio",
-                  data: event.data.data,
-                })
-              );
-            }
-          };
-
-          // Connect the audio nodes
-          source.connect(audioWorkletNode.current);
-
-          setStatus("Recording...");
-          setIsRecording(true);
-        } catch (error) {
-          console.error("Error setting up audio:", error);
-          setStatus("Error setting up audio");
-          stopRecording();
-        }
-      };
-
-      websocket.current.onerror = (error) => {
-        console.error("WebSocket error:", error);
-        setStatus("WebSocket error");
-        stopRecording();
-      };
-
-      websocket.current.onclose = () => {
-        setStatus("Disconnected");
-        stopRecording();
-      };
-
-      websocket.current.onmessage = (event) => {
-        // Handle incoming messages from the server
-        console.log("Received:", event.data);
-      };
+      // Ensure WebSocket is connected
+      await connectWebSocket();
+      
+      // Start microphone recording
+      await startMicRecording();
     } catch (error) {
       console.error("Error starting recording:", error);
       setStatus("Error starting recording");
       stopRecording();
     }
-  };
+  }, [connectWebSocket, startMicRecording, stopRecording]);
 
   const toggleRecording = () => {
     if (isRecording) {
