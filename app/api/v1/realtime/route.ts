@@ -2,26 +2,9 @@ import { NextResponse } from "next/server";
 import { Sandbox } from "@vercel/sandbox";
 import ms from "ms";
 
-const pkgJson = JSON.stringify(
-  {
-    name: "openai-realtime-gateway",
-    private: true,
-    scripts: {
-      dev: "node ./index.js",
-    },
-    type: "module",
-    dependencies: { dotenv: "^16.4.7" },
-  },
-  null,
-  2
-);
-
-const index = `
-console.log("Hello, world!");
-`;
-
 async function createWebSocketServer() {
   const sandbox = await Sandbox.create({
+    source: { type: "git", url: "https://github.com/robkebab/ex-s2s-proxy" },
     resources: { vcpus: 2 },
     timeout: ms("5m"),
     ports: [3000],
@@ -30,8 +13,6 @@ async function createWebSocketServer() {
 
   console.log(`Writing sandbox files...`);
   await sandbox.writeFiles([
-    { path: "package.json", content: Buffer.from(pkgJson) },
-    { path: "index.js", content: Buffer.from(index) },
     {
       path: ".env",
       content: Buffer.from(`OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`),
@@ -60,13 +41,12 @@ async function createWebSocketServer() {
   });
 
   const publicUrl = sandbox.domain(3000);
-  publicUrl.replace(/^https:/, "wss:");
+  return publicUrl.replace(/^https:/, "wss:") + "/realtime";
 }
 
 export async function POST(_request: Request) {
   try {
-    // const socketUrl = await createWebSocketServer();
-    const socketUrl = "ws://localhost:8080/realtime";
+    const socketUrl = await createWebSocketServer();
 
     return NextResponse.json({
       socketUrl,
