@@ -7,7 +7,7 @@ async function createWebSocketServer() {
     source: { type: "git", url: "https://github.com/robkebab/ex-s2s-proxy.git" },
     resources: { vcpus: 2 },
     timeout: ms("5m"),
-    ports: [3000],
+    ports: [3001],
     runtime: "node22",
   });
 
@@ -15,7 +15,9 @@ async function createWebSocketServer() {
   await sandbox.writeFiles([
     {
       path: ".env",
-      content: Buffer.from(`OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`),
+      content: Buffer.from(`OPENAI_API_KEY=${process.env.OPENAI_API_KEY}
+        PORT=3001
+        `),
     },
   ]);
 
@@ -35,12 +37,14 @@ async function createWebSocketServer() {
   console.log(`Starting the sandbox server...`);
   await sandbox.runCommand({
     cmd: "npm",
-    args: ["run", "dev"],
+    args: ["start"],
     stderr: process.stderr,
     stdout: process.stdout,
+    detached: true,
   });
 
-  const publicUrl = sandbox.domain(3000);
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const publicUrl = sandbox.domain(3001);
   return publicUrl.replace(/^https:/, "wss:") + "/realtime";
 }
 
