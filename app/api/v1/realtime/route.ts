@@ -4,7 +4,10 @@ import ms from "ms";
 
 async function createWebSocketServer() {
   const sandbox = await Sandbox.create({
-    source: { type: "git", url: "https://github.com/robkebab/ex-s2s-proxy.git" },
+    source: {
+      type: "git",
+      url: "https://github.com/robkebab/ex-s2s-proxy.git",
+    },
     resources: { vcpus: 2 },
     timeout: ms("5m"),
     ports: [3001],
@@ -43,8 +46,22 @@ async function createWebSocketServer() {
     detached: true,
   });
 
-  await new Promise(resolve => setTimeout(resolve, 500));
   const publicUrl = sandbox.domain(3001);
+
+  let attempts = 0;
+  while (attempts < 5) {
+    try {
+      const response = await fetch(`${publicUrl}/health`);
+      if (response.ok) {
+        break;
+      }
+    } catch (error) {
+      console.error(error);
+    }
+    attempts++;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
   return publicUrl.replace(/^https:/, "wss:") + "/realtime";
 }
 
